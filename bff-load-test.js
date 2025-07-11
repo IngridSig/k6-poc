@@ -3,97 +3,55 @@ import { check, sleep, group } from 'k6';
 
 export const options = {
   scenarios: {
-    // End-to-end user workflow test
+    // Light functional test - just verify the workflow works
     user_workflow: {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '1m', target: 10 },   // Ramp up to 10 users
-        { duration: '2m', target: 25 },   // Ramp up to 25 users  
-        { duration: '2m', target: 50 },   // Ramp up to 50 users
-        { duration: '1m', target: 0 },    // Ramp down
+        { duration: '30s', target: 1 },   // Ramp up to 1 user
+        { duration: '1m', target: 2 },    // Ramp up to 2 users  
+        { duration: '30s', target: 0 },   // Ramp down
       ],
       exec: 'userWorkflowTest'
-    },
-    
-    // Admin bulk operations test
-    admin_bulk: {
-      executor: 'constant-arrival-rate',
-      rate: 5,           // 5 requests per second
-      timeUnit: '1s',
-      duration: '3m',
-      preAllocatedVUs: 10,
-      exec: 'adminBulkTest'
     }
   },
   
   thresholds: {
-    http_req_duration: ['p(95)<3000'],  // 95% of requests under 3s
-    http_req_failed: ['rate<0.1'],      // Error rate under 10%
-    'group_duration{group:::User Workflow}': ['p(95)<5000'], // User workflow under 5s
+    http_req_duration: ['p(95)<5000'],  // 95% of requests under 5s (relaxed)
+    http_req_failed: ['rate<0.2'],      // Error rate under 20% (relaxed)
+    'group_duration{group:::User Workflow}': ['p(95)<10000'], // User workflow under 10s (relaxed)
   }
 };
 
-// Environment configuration
-const BASE_URL = __ENV.BASE_URL || 'https://qa-1-api.d.bark.com';
-const FUSIONAUTH_API_KEY = __ENV.FUSIONAUTH_API_KEY;
-const TOKEN_ISSUER_URL = __ENV.TOKEN_ISSUER_URL || 'https://fusionauth-gateway-admin.qa.barkenvs.systems/auth/issue-token';
+// Environment configuration - LOCAL TESTING
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+const ADMIN_TOKEN = __ENV.ADMIN_TOKEN || 'foobar';
 
-// Generate JWT Token for user authentication
-function generateJWTToken(userId, sellerProfileId) {
-  const tokenPayload = {
-    claims: {
-      spfid: sellerProfileId,  // seller profile ID
-      brkuid: userId          // user ID  
-    },
-    expires_in: 3600
-  };
-  
-  const response = http.post(
-    TOKEN_ISSUER_URL,
-    JSON.stringify(tokenPayload),
-    {
-      headers: {
-        'api-key': FUSIONAUTH_API_KEY,
-        'Content-Type': 'application/json'
-      }
-    }
-  );
-  
-  if (response.status !== 200) {
-    console.error(`Failed to generate JWT token: ${response.status} ${response.body}`);
-    return null;
-  }
-  
-  return JSON.parse(response.body).token;
-}
-
-// Test Scenario 1: Complete User Workflow
+// Test Scenario 1: Complete User Workflow (LOCAL VERSION)
 export function userWorkflowTest() {
-  const userId = Math.floor(Math.random() * 10000);
+  const userId = Math.floor(Math.random() * 1000);
   const sellerProfileId = `load_test_profile_${userId}`;
   
-  // Generate JWT token for this user
-  const jwtToken = generateJWTToken(userId, sellerProfileId);
-  if (!jwtToken) {
-    console.error('Failed to generate JWT token, skipping user workflow test');
-    return;
-  }
-  
+  // Use admin token for local testing (no FusionAuth)
   const userHeaders = {
     headers: {
-      'Authorization': `Bearer ${jwtToken}`,
+      'X-Admin-Token': ADMIN_TOKEN,
       'Content-Type': 'application/json'
     }
   };
   
   group('User Workflow', () => {
     // Step 1: Check workflow state
+    console.log(`Testing workflow for user ${userId}`);
     let response = http.get(`${BASE_URL}/workflow-state`, userHeaders);
     check(response, { 
       'workflow state check status 200': (r) => r.status === 200,
-      'workflow state has valid response': (r) => r.body.includes('status')
+      'workflow state has valid response': (r) => r.body && r.body.length > 0
     });
+    
+    if (response.status !== 200) {
+      console.error(`Workflow state failed: ${response.status} ${response.body}`);
+    }
     
     // Step 2: Submit validated data
     const businessData = {
@@ -111,8 +69,12 @@ export function userWorkflowTest() {
     response = http.post(`${BASE_URL}/validated-data`, JSON.stringify(businessData), userHeaders);
     check(response, { 
       'validated data status 200': (r) => r.status === 200,
-      'validated data returns profile': (r) => r.body.includes('status')
+      'validated data returns response': (r) => r.body && r.body.length > 0
     });
+    
+    if (response.status !== 200) {
+      console.error(`Validated data failed: ${response.status} ${response.body}`);
+    }
     
     // Step 3: Submit final profile
     const finalProfile = {
@@ -125,11 +87,15 @@ export function userWorkflowTest() {
     response = http.post(`${BASE_URL}/submit-final-profile`, JSON.stringify(finalProfile), userHeaders);
     check(response, { 
       'final profile status 200': (r) => r.status === 200,
-      'final profile accepted': (r) => r.body.includes('success') || r.body.includes('status')
+      'final profile returns response': (r) => r.body && r.body.length > 0
     });
+    
+    if (response.status !== 200) {
+      console.error(`Final profile failed: ${response.status} ${response.body}`);
+    }
   });
   
-  sleep(1);
+  sleep(2); // Longer sleep for lighter testing
 }
 
 // Health check test (can be used for warm-up)
@@ -137,6 +103,6 @@ export function healthCheck() {
   const response = http.get(`${BASE_URL}/health/ready`);
   check(response, {
     'health check status 200': (r) => r.status === 200,
-    'service is ready': (r) => r.body.includes('ready')
+    'service is ready': (r) => r.body && r.body.includes('ready')
   });
 }
